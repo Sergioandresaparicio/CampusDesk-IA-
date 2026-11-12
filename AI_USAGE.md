@@ -34,3 +34,23 @@ En el marco del desarrollo del backend para **CampusDesk** (Sistema Inteligente 
 
 ## 3. Supervisión Humana y Validación
 - Toda la estructura de base de datos, puertos, contratos de interfaz y respuestas JSON fueron auditados contra los requerimientos técnicos y verificados en compilación local con `mvn test` y `mvn clean install` con código de salida `0` (BUILD SUCCESS).
+
+---
+
+## 4. Infraestructura Docker y Orquestación n8n (Rama `Dev-Diego`)
+
+### 4.1 Herramientas y Alcance
+- En la fase de infraestructura y automatización inteligente (`Dev-Diego`), se utilizó **Antigravity AI** para estructurar la contenerización con Docker Compose y diseñar los dos flujos obligatorios de **n8n** integrados con **Qdrant**, **OpenRouter** y los endpoints M2M de Spring Boot.
+
+### 4.2 Componentes Asistidos y Decisiones Técnicas
+- **Contenerización (`Dockerfile`, `docker-compose.yml`, `.env.example`):**
+  - Se creó un `Dockerfile` multi-stage (`maven:3.9.9-eclipse-temurin-21-alpine` → `eclipse-temurin:21-jre-alpine`) para compilar y ejecutar el backend sin depender de Java 21/Maven locales.
+  - Se configuró `docker-compose.yml` con `postgres:16-alpine`, `qdrant/qdrant:latest`, `docker.n8n.io/n8nio/n8n:latest` y `backend`, incluyendo `healthcheck` nativo sin `curl` para Qdrant (`/dev/tcp/127.0.0.1/6333`), `/healthz` para n8n, `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` para lectura de variables `.env`, y `extra_hosts` (`host.docker.internal`) para soportar ejecución híbrida.
+  - Se actualizó `.gitignore` para excluir `.env` y volúmenes locales de datos.
+- **Flujo 1 — Indexación en Qdrant ([01-knowledge-base-indexing.json](n8n/workflows/01-knowledge-base-indexing.json)):**
+  - Creación idempotente de colección en Qdrant (`GET` con fallback `PUT`), consulta autenticada (`X-N8N-Api-Key`) a `/api/v1/integrations/n8n/data`, generación de embeddings vía OpenRouter (`/api/v1/embeddings`), *upsert* usando `article.id` como identificador de punto para evitar duplicados, y depuración automática (`scroll` + `delete`) de artículos desactivados.
+- **Flujo 2 — Asistencia RAG ([02-rag-incident-assistant.json](n8n/workflows/02-rag-incident-assistant.json)):**
+  - Recepción en `POST /webhook/campusdesk-incident`, validación de texto no vacío (`400 Bad Request` en entradas vacías, `202 Accepted` inmediato para evitar timeout de 15s en `RestClient`), búsqueda vectorial Top-5 en Qdrant con filtro `active=true && verified=true` y `score_threshold` configurable (`0.70`), bifurcación estricta a `SIN_RESULTADOS` cuando no hay fuentes sobre el umbral, generación fundamentada en JSON vía OpenRouter LLM, y manejo de errores por salida secundaria (`continueErrorOutput`) reportando `status: "ERROR"` al callback `/api/v1/integrations/n8n/callback`.
+
+### 4.3 Validación Pendiente en Entorno Local
+- Los archivos JSON de n8n fueron validados sintácticamente tras su generación; la ejecución completa de contenedores (`docker compose up`) y pruebas extremo a extremo con API Key real de OpenRouter quedan pendientes de instalación de Docker Desktop y WSL 2 en el equipo local.
