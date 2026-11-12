@@ -138,15 +138,22 @@ public class N8nIntegrationService {
         query.setStatus(payload.getStatus());
         queryRepository.save(query);
 
-        AiResponse aiResponse = AiResponse.builder()
-                .query(query)
-                .responseText(payload.getResponseText())
-                .suggestedSteps(payload.getSuggestedSteps())
-                .modelUsed(payload.getModelUsed() != null ? payload.getModelUsed() : "n8n-rag-orchestrator")
-                .confidenceScore(payload.getConfidenceScore() != null ? payload.getConfidenceScore() : 0.90)
-                .createdAt(LocalDateTime.now())
-                .sources(new ArrayList<>())
-                .build();
+        AiResponse aiResponse = responseRepository.findByQueryId(query.getId())
+                .orElseGet(() -> AiResponse.builder()
+                        .query(query)
+                        .createdAt(LocalDateTime.now())
+                        .sources(new ArrayList<>())
+                        .build());
+
+        aiResponse.setResponseText(payload.getResponseText());
+        aiResponse.setSuggestedSteps(payload.getSuggestedSteps());
+        aiResponse.setModelUsed(payload.getModelUsed() != null ? payload.getModelUsed() : "n8n-rag-orchestrator");
+        aiResponse.setConfidenceScore(payload.getConfidenceScore() != null ? payload.getConfidenceScore() : 0.90);
+        if (aiResponse.getSources() == null) {
+            aiResponse.setSources(new ArrayList<>());
+        } else {
+            aiResponse.getSources().clear();
+        }
 
         AiResponse savedResponse = responseRepository.save(aiResponse);
 

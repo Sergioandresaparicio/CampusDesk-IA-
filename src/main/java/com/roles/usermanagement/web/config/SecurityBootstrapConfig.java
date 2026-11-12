@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Configuration;
 public class SecurityBootstrapConfig {
 
     @Bean
+    @org.springframework.core.annotation.Order(1)
     public ApplicationRunner initializeSecurity(SecurityBootstrapService bootstrap) {
         return args -> bootstrap.initialize();
     }
