@@ -1,0 +1,455 @@
+{
+  "name": "CampusDesk - 02 Asistente Inteligente RAG",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "campusdesk-incident",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 340],
+      "id": "20000000-0000-4000-8000-000000000001",
+      "name": "Webhook: Receive Incident",
+      "webhookId": "campusdesk-incident-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst body = (raw && typeof raw.body === 'object' && raw.body !== null) ? raw.body : raw;\n\nconst queryId = body.queryId ?? null;\nconst ticketId = body.ticketId ?? null;\nconst title = String(body.title ?? '').trim();\nconst description = String(body.description ?? '').trim();\nconst question = String(body.question ?? '').trim();\nconst category = String(body.category ?? 'OTROS').trim();\nconst priority = String(body.priority ?? 'MEDIA').trim();\n\nconst hasText = question.length > 0 || description.length > 0;\nconst isValid = hasText && queryId !== null;\n\nconst queryText = [\n  title ? `Título: ${title}` : '',\n  description ? `Descripción: ${description}` : '',\n  question ? `Consulta: ${question}` : '',\n  category ? `Categoría reportada: ${category}` : ''\n].filter(Boolean).join('\\n');\n\nconst envBase = ($env.BACKEND_BASE_URL || '').trim();\nconst resolvedCallbackUrl = envBase\n  ? `${envBase.replace(/\\/$/, '')}/api/v1/integrations/n8n/callback`\n  : (body.callbackUrl || 'http://backend:8051/api/v1/integrations/n8n/callback');\n\nconst scoreThreshold = Number($env.QDRANT_SCORE_THRESHOLD || 0.70);\n\nreturn [{\n  json: {\n    isValid: String(isValid),\n    queryId,\n    ticketId,\n    title,\n    description,\n    question,\n    category,\n    priority,\n    queryText,\n    resolvedCallbackUrl,\n    scoreThreshold: Number.isFinite(scoreThreshold) ? scoreThreshold : 0.70\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 340],
+      "id": "20000000-0000-4000-8000-000000000002",
+      "name": "Normalize & Validate Input"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-input-valid",
+              "leftValue": "={{ $json.isValid }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 340],
+      "id": "20000000-0000-4000-8000-000000000003",
+      "name": "If Input Valid"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ accepted: true, queryId: $json.queryId, message: 'Incidente recibido para procesamiento RAG en n8n' }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [940, 140],
+      "id": "20000000-0000-4000-8000-000000000004",
+      "name": "Respond 202 Accepted"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"accepted\": false, \"error\": \"La descripción/consulta y queryId son obligatorios. No se ejecuta el flujo RAG.\" }",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [940, 540],
+      "id": "20000000-0000-4000-8000-000000000005",
+      "name": "Respond 400 Bad Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/embeddings",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.OPENROUTER_API_KEY || '') }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "HTTP-Referer",
+              "value": "http://localhost:8051"
+            },
+            {
+              "name": "X-Title",
+              "value": "CampusDesk-IA"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OPENROUTER_EMBEDDING_MODEL || 'openai/text-embedding-3-small', input: $('Normalize & Validate Input').first().json.queryText }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [940, 320],
+      "id": "20000000-0000-4000-8000-000000000006",
+      "name": "Generate Query Embedding (OpenRouter)",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.QDRANT_URL || 'http://qdrant:6333').replace(/\\/$/, '') + '/collections/' + ($env.QDRANT_COLLECTION || 'campusdesk_kb') + '/points/search' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vector: $json.data?.[0]?.embedding || [], limit: 5, score_threshold: $('Normalize & Validate Input').first().json.scoreThreshold, with_payload: true, filter: { must: [ { key: 'active', match: { value: true } }, { key: 'verified', match: { value: true } } ] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 260],
+      "id": "20000000-0000-4000-8000-000000000007",
+      "name": "Search Qdrant Top-K",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $('Normalize & Validate Input').first().json;\nconst threshold = Number(inputData.scoreThreshold ?? 0.70);\nconst rawResults = Array.isArray($input.first().json?.result)\n  ? $input.first().json.result\n  : [];\n\nconst filtered = rawResults\n  .filter(r =>\n    typeof r.score === 'number' &&\n    r.score >= threshold &&\n    r.payload &&\n    r.payload.active !== false &&\n    r.payload.verified !== false\n  )\n  .slice(0, 5);\n\nif (filtered.length === 0) {\n  return [{\n    json: {\n      hasSources: 'false',\n      threshold,\n      sources: [],\n      contextText: '',\n      confidenceScore: 0.0\n    }\n  }];\n}\n\nconst contextBlocks = filtered.map((r, idx) => {\n  const p = r.payload || {};\n  const articleId = Number(p.articleId ?? r.id);\n  const score = Number(r.score).toFixed(4);\n  return [\n    `--- FUENTE #${idx + 1} (articleId: ${articleId}, similitud: ${score}) ---`,\n    `Título: ${p.title || 'Sin título'}`,\n    `Categoría: ${p.category || 'OTROS'}`,\n    `Problema: ${p.problem || ''}`,\n    p.symptoms ? `Síntomas: ${p.symptoms}` : '',\n    p.cause ? `Causa raíz: ${p.cause}` : '',\n    `Solución documentada: ${p.solution || ''}`\n  ].filter(Boolean).join('\\n');\n});\n\nconst sources = filtered.map(r => ({\n  articleId: Number(r.payload?.articleId ?? r.id),\n  similarityScore: Math.round(Number(r.score) * 10000) / 10000\n}));\n\nconst confidenceScore = sources[0]?.similarityScore ?? 0.0;\n\nreturn [{\n  json: {\n    hasSources: 'true',\n    threshold,\n    sources,\n    contextText: contextBlocks.join('\\n\\n'),\n    confidenceScore\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1460, 200],
+      "id": "20000000-0000-4000-8000-000000000008",
+      "name": "Evaluate Retrieval & Build Context"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-has-sources",
+              "leftValue": "={{ $json.hasSources }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1700, 200],
+      "id": "20000000-0000-4000-8000-000000000009",
+      "name": "Has Relevant Sources?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.OPENROUTER_API_KEY || '') }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "HTTP-Referer",
+              "value": "http://localhost:8051"
+            },
+            {
+              "name": "X-Title",
+              "value": "CampusDesk-IA"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: $env.OPENROUTER_CHAT_MODEL || 'openai/gpt-4o-mini', temperature: 0.1, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'Eres el asistente técnico de soporte CampusDesk. Responde EXCLUSIVAMENTE usando la información contenida en las FUENTES proporcionadas. Prohibido inventar comandos, pasos, herramientas o datos que no aparezcan en las fuentes. Devuelve SOLO un objeto JSON válido con las claves exactas: \"responseText\" (resumen técnico claro citando las fuentes y su similitud), \"suggestedSteps\" (pasos numerados recomendados extraídos de las fuentes), y \"suggestedPriority\" (uno exactamente de: BAJA, MEDIA, ALTA, CRITICA).' }, { role: 'user', content: 'Incidente:\\n' + $('Normalize & Validate Input').first().json.queryText + '\\n\\nPrioridad actual: ' + $('Normalize & Validate Input').first().json.priority + '\\n\\nFUENTES RECUPERADAS DE QDRANT:\\n' + $json.contextText } ] }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1960, 120],
+      "id": "20000000-0000-4000-8000-000000000010",
+      "name": "Generate Grounded Answer (OpenRouter LLM)",
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $('Normalize & Validate Input').first().json;\nconst retrieval = $('Evaluate Retrieval & Build Context').first().json;\nconst llmResponse = $input.first().json;\n\nconst rawContent = String(llmResponse?.choices?.[0]?.message?.content || '').trim();\nconst cleaned = rawContent\n  .replace(/^```json\\s*/i, '')\n  .replace(/^```\\s*/i, '')\n  .replace(/```$/i, '')\n  .trim();\n\nlet parsed = {};\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  parsed = {\n    responseText: rawContent || 'Orientación generada a partir de las fuentes recuperadas.',\n    suggestedSteps: 'Revisar los procedimientos indicados en las fuentes adjuntas.',\n    suggestedPriority: null\n  };\n}\n\nconst validPriorities = new Set(['BAJA', 'MEDIA', 'ALTA', 'CRITICA']);\nconst candidatePriority = String(parsed.suggestedPriority || '').toUpperCase().trim();\nconst suggestedPriority = validPriorities.has(candidatePriority) ? candidatePriority : null;\n\nconst responseText = String(parsed.responseText || '').trim()\n  || 'Se encontraron artículos relevantes en la base de conocimiento; revisar las fuentes adjuntas.';\nconst suggestedSteps = String(parsed.suggestedSteps || '').trim()\n  || 'Aplicar los pasos documentados en los artículos fuente.';\n\nreturn [{\n  json: {\n    callbackUrl: inputData.resolvedCallbackUrl,\n    payload: {\n      queryId: inputData.queryId,\n      ticketId: inputData.ticketId,\n      status: 'RESPONDIDA',\n      responseText,\n      suggestedSteps,\n      modelUsed: llmResponse?.model || ($env.OPENROUTER_CHAT_MODEL || 'openai/gpt-4o-mini'),\n      confidenceScore: retrieval.confidenceScore,\n      suggestedPriority,\n      sources: retrieval.sources\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2220, 120],
+      "id": "20000000-0000-4000-8000-000000000011",
+      "name": "Format RAG Callback Payload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $('Normalize & Validate Input').first().json;\nconst retrieval = $('Evaluate Retrieval & Build Context').first().json;\nconst threshold = retrieval?.threshold ?? inputData.scoreThreshold ?? 0.70;\n\nreturn [{\n  json: {\n    callbackUrl: inputData.resolvedCallbackUrl,\n    payload: {\n      queryId: inputData.queryId,\n      ticketId: inputData.ticketId,\n      status: 'SIN_RESULTADOS',\n      responseText: `No se encontraron soluciones verificadas en la base de conocimiento que superen el umbral mínimo de similitud (${threshold}). No se genera solución automática sin respaldo documental.`,\n      suggestedSteps: '1. Escalar el incidente al técnico especialista según su categoría. 2. Diagnosticar manualmente el problema. 3. Documentar la solución como un nuevo artículo verificado al cerrar el ticket.',\n      modelUsed: 'qdrant-threshold-filter',\n      confidenceScore: 0.0,\n      sources: []\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 320],
+      "id": "20000000-0000-4000-8000-000000000012",
+      "name": "Build No-Results Callback Payload"
+    },
+    {
+      "parameters": {
+        "jsCode": "const inputData = $('Normalize & Validate Input').first().json;\nconst errItem = $input.first().json || {};\nconst errorMessage = errItem?.error?.message\n  || errItem?.message\n  || 'Fallo al comunicarse con el servicio de embeddings, Qdrant o modelo generativo.';\n\nreturn [{\n  json: {\n    callbackUrl: inputData.resolvedCallbackUrl,\n    payload: {\n      queryId: inputData.queryId,\n      ticketId: inputData.ticketId,\n      status: 'ERROR',\n      responseText: `Error durante la orquestación inteligente en n8n: ${errorMessage}`,\n      suggestedSteps: '1. Verificar conectividad y credenciales de OpenRouter y Qdrant. 2. Reintentar el análisis inteligente o atender manualmente.',\n      modelUsed: 'n8n-error-handler',\n      confidenceScore: 0.0,\n      sources: []\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 500],
+      "id": "20000000-0000-4000-8000-000000000013",
+      "name": "Build Error Callback Payload"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-N8N-Api-Key",
+              "value": "={{ $env.N8N_API_KEY || 'campusdesk-n8n-m2m-secret-key-2026' }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2480, 320],
+      "id": "20000000-0000-4000-8000-000000000014",
+      "name": "Send Callback to Spring Boot"
+    }
+  ],
+  "connections": {
+    "Webhook: Receive Incident": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Validate Input": {
+      "main": [
+        [
+          {
+            "node": "If Input Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Input Valid": {
+      "main": [
+        [
+          {
+            "node": "Respond 202 Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond 400 Bad Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond 202 Accepted": {
+      "main": [
+        [
+          {
+            "node": "Generate Query Embedding (OpenRouter)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Query Embedding (OpenRouter)": {
+      "main": [
+        [
+          {
+            "node": "Search Qdrant Top-K",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Callback Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Qdrant Top-K": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Retrieval & Build Context",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Callback Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Retrieval & Build Context": {
+      "main": [
+        [
+          {
+            "node": "Has Relevant Sources?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Relevant Sources?": {
+      "main": [
+        [
+          {
+            "node": "Generate Grounded Answer (OpenRouter LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build No-Results Callback Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Grounded Answer (OpenRouter LLM)": {
+      "main": [
+        [
+          {
+            "node": "Format RAG Callback Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Error Callback Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format RAG Callback Payload": {
+      "main": [
+        [
+          {
+            "node": "Send Callback to Spring Boot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build No-Results Callback Payload": {
+      "main": [
+        [
+          {
+            "node": "Send Callback to Spring Boot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Error Callback Payload": {
+      "main": [
+        [
+          {
+            "node": "Send Callback to Spring Boot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {}
+}
