@@ -30,6 +30,13 @@ data/
 *.mv.db
 *.trace.db
 
+### Environment & Docker Volumes ###
+.env
+.env.local
+postgres_data/
+qdrant_data/
+n8n_data/
+
 ### Logs ###
 log
 *.log

@@ -1,0 +1,129 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: campusdesk-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-campusdesk}
+      POSTGRES_USER: ${DB_USERNAME:-campusdesk}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-campusdesk_change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-campusdesk} -d ${POSTGRES_DB:-campusdesk}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - campusdesk-net
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: campusdesk-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '(: </dev/tcp/127.0.0.1/6333) &>/dev/null' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - campusdesk-net
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: campusdesk-n8n
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=${N8N_WEBHOOK_PUBLIC_URL:-http://localhost:5678/}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-America/Bogota}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-campusdesk-local-n8n-encryption-key-2026}
+      # Allow workflows to read $env.* variables configured via .env
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - N8N_PERSONALIZATION_ENABLED=false
+      - N8N_DIAGNOSTICS_ENABLED=false
+      # CampusDesk integration environment variables used by n8n workflows
+      - BACKEND_BASE_URL=${BACKEND_BASE_URL:-http://backend:8051}
+      - N8N_API_KEY=${N8N_API_KEY:-campusdesk-n8n-m2m-secret-key-2026}
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-campusdesk_kb}
+      - QDRANT_SCORE_THRESHOLD=${QDRANT_SCORE_THRESHOLD:-0.70}
+      - QDRANT_VECTOR_SIZE=${QDRANT_VECTOR_SIZE:-1536}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_EMBEDDING_MODEL=${OPENROUTER_EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      - OPENROUTER_CHAT_MODEL=${OPENROUTER_CHAT_MODEL:-openai/gpt-4o-mini}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/home/node/workflows:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - campusdesk-net
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: campusdesk-backend
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-8051}:8051"
+    environment:
+      - SERVER_PORT=8051
+      - DB_URL=${DB_URL:-jdbc:postgresql://postgres:5432/campusdesk}
+      - DB_DRIVER=${DB_DRIVER:-org.postgresql.Driver}
+      - DB_USERNAME=${DB_USERNAME:-campusdesk}
+      - DB_PASSWORD=${DB_PASSWORD:-campusdesk_change_me}
+      - JWT_SECRET=${JWT_SECRET:-0fb5a8994cde705e2f45ca46921f00bffa60fdcb17ee9eecbcfed06574fa38d7}
+      - JWT_ISSUER=${JWT_ISSUER:-campusdesk-auth-issuer}
+      - JWT_EXPIRATION=${JWT_EXPIRATION:-15d}
+      - BOOTSTRAP_ADMIN_ENABLED=${BOOTSTRAP_ADMIN_ENABLED:-true}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-superadmin}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-superadmin@campusdesk.edu}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-SuperAdmin123!}
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/campusdesk-incident}
+      - N8N_API_KEY=${N8N_API_KEY:-campusdesk-n8n-m2m-secret-key-2026}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8051/v3/api-docs >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    networks:
+      - campusdesk-net
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  n8n_data:
+
+networks:
+  campusdesk-net:
+    driver: bridge
